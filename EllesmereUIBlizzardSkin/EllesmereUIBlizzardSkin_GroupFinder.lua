@@ -1400,7 +1400,27 @@ local function DockCharacterFrame()
     local rightFrame, rightEdgeAbs = FindOutermostFrame(pve, "right")
     local leftRoom  = leftEdgeAbs
     local rightRoom = (GetScreenWidth() or 0) * ues - rightEdgeAbs
-    local dockLeft = leftRoom >= wAbs + PVE_DOCK_MARGIN * cs or leftRoom >= rightRoom
+    local neededAbs = wAbs + PVE_DOCK_MARGIN * cs
+    -- Right is the default side, left only a fallback. Blizzard's own panel
+    -- layout puts PVEFrame in the left slot and CharacterFrame in the center
+    -- slot beside it, so docking right is what reproduces the native
+    -- arrangement; docking left is only worth doing when CharacterFrame
+    -- genuinely does not fit on the right.
+    -- leftRoom/rightRoom are distances to the SCREEN edges, NOT to Blizzard's
+    -- window dock area (UIParent's LEFT_OFFSET attribute, which addons that
+    -- confine the dock to the middle of a wide monitor raise). Preferring the
+    -- left whenever raw screen room merely looked bigger therefore parked the
+    -- pane far outside that area on such setups, and the hooksecurefunc on
+    -- CharacterFrame's SetPoint re-applied it on every layout pass. Deciding
+    -- by fit-on-the-right instead needs no panel-area attributes at all --
+    -- which matters because they are UIParent attributes on 12.0 but moved to
+    -- UIPanelLayoutFrame/GetUIPanelLayoutAttribute on 12.1, both of which this
+    -- TOC supports. See issue #1.
+    -- When the right side is genuinely too small the original preference
+    -- (fits on the left, else whichever side is roomier) still decides, so
+    -- layouts that were already docking left keep doing so.
+    local dockLeft = rightRoom < neededAbs
+        and (leftRoom >= neededAbs or leftRoom >= rightRoom)
 
     local targetPoint, targetRel, targetRelPoint, targetX, targetY, expectedEdgeAbs
     if dockLeft then
