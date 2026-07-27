@@ -15,11 +15,20 @@ name: Fork release (upstream tag + feat branches)
 #
 # Scheduled runs release once per upstream tag. To cut a new release for the
 # same upstream tag (e.g. after adding a feat branch mid-cycle), trigger the
-# workflow manually with force enabled — it bumps the -bmf.N suffix.
+# workflow manually with force enabled — it bumps the -bmf.N suffix. Two more
+# paths force a mid-cycle release automatically:
+#   - creating a feat/* branch: fork-branch-sanitize.yml strips the fork-only
+#     config commits from the new branch, then dispatches this workflow with
+#     force (a create trigger here would race the sanitizer's force-push);
+#   - deleting a feat/* branch: the delete trigger below rebuilds the release
+#     without it right away instead of waiting for the next upstream tag.
+# Either way the release is still built from the latest upstream release tag,
+# exactly as on scheduled runs.
 
 on:
   schedule:
     - cron: '17 3,15 * * *'
+  delete:
   workflow_dispatch:
     inputs:
       force:
@@ -46,6 +55,9 @@ env:
 
 jobs:
   release:
+    # The delete trigger fires for every ref; only feat/* branch deletions
+    # change what a release contains.
+    if: github.event_name != 'delete' || (github.event.ref_type == 'branch' && startsWith(github.event.ref, 'feat/'))
     runs-on: ubuntu-latest
     outputs:
       conflict: ${{ steps.build.outputs.conflict }}
@@ -61,7 +73,7 @@ jobs:
       - name: Merge feat branches onto latest upstream tag
         id: build
         env:
-          FORCE: ${{ inputs.force == true }}
+          FORCE: ${{ inputs.force == true || github.event_name == 'delete' }}
           ATTEMPT: ${{ inputs.attempt || '0' }}
         run: |
           set -euo pipefail

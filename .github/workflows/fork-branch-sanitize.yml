@@ -1,0 +1,95 @@
+name: Sanitize feat branches
+
+# Fork main (the default branch) carries fork-only commits — the workflows
+# that automate fork releases — which must never appear in upstream pull
+# requests. Any feat/* branch cut from fork main inherits them, so this
+# workflow puts them back out: when a feat/* branch is created (or a push
+# reintroduces the config), it rebases the branch's own commits onto the
+# upstream commit fork main sits on, force-pushes the cleaned branch, and
+# dispatches fork-release.yml with force so a new release — built, as always,
+# from the latest upstream release tag — picks the branch up immediately.
+#
+# create/push only trigger workflows whose file exists on the pushed ref, so
+# this fires exactly for branches cut from fork main — the polluted case — and
+# never for branches cut directly from upstream. Those are already clean; to
+# release one immediately, dispatch fork-release manually with force (or wait
+# for its scheduled run). The same limitation means later pushes to an
+# already-sanitized branch cannot re-trigger anything; the scheduled release
+# run covers those.
+
+on:
+  create:
+  push:
+    branches:
+      - 'feat/**'
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: sanitize-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: https://github.com/EllesmereGaming/EllesmereUI.git
+
+jobs:
+  sanitize:
+    if: (github.event_name == 'push' || github.event.ref_type == 'branch') && startsWith(github.ref_name, 'feat/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Strip fork-only commits from the branch
+        id: strip
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream "$UPSTREAM_REPO"
+          git fetch --quiet upstream
+
+          base=$(git merge-base origin/main upstream/main)
+          echo "Upstream base of fork main: $base"
+
+          if ! git cat-file -e "origin/$BRANCH:.github/workflows/fork-release.yml" 2>/dev/null; then
+            echo "$BRANCH does not carry the fork-only config; nothing to do."
+            exit 0
+          fi
+
+          git checkout -B "$BRANCH" "origin/$BRANCH"
+          if ! git rebase --onto "$base" origin/main; then
+            git rebase --abort || true
+            echo "::error::Could not cleanly strip the fork-only commits from $BRANCH; rebase it manually with: git rebase --onto $base origin/main"
+            exit 1
+          fi
+
+          # A branch with an unusual history (e.g. cut from a fork main that
+          # was since rewritten) could survive the rebase still polluted;
+          # never force-push in that case.
+          if git cat-file -e "HEAD:.github/workflows/fork-release.yml" 2>/dev/null; then
+            echo "::error::Rebase left the fork-only config in place on $BRANCH (unexpected history); leaving the branch untouched"
+            exit 1
+          fi
+
+          git push --force-with-lease origin "$BRANCH"
+          echo "Stripped fork-only commits from $BRANCH"
+
+          if [ "$(git rev-parse HEAD)" != "$base" ]; then
+            echo "dispatch=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "$BRANCH has no commits of its own yet; skipping the release dispatch."
+          fi
+
+      - name: Cut a fork release including this branch
+        if: steps.strip.outputs.dispatch == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run fork-release.yml --ref main -f force=true
