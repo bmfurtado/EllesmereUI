@@ -69,6 +69,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # Pushing the fork tag also pushes upstream's commits into the fork,
+          # and those may touch .github/workflows/*. GITHUB_TOKEN (an App token)
+          # can never push workflow changes, so use a PAT with workflows scope.
+          token: ${{ secrets.FORK_RELEASE_TOKEN }}
 
       - name: Merge feat branches onto latest upstream tag
         id: build
@@ -153,6 +157,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # A branch rebased onto the upstream tag carries upstream's workflow
+          # edits; the force-push needs the same PAT as the release job's push.
+          token: ${{ secrets.FORK_RELEASE_TOKEN }}
 
       - name: Record branch state
         id: pre
