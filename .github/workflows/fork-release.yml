@@ -301,8 +301,13 @@ jobs:
             echo "Failed run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } > /tmp/issue-body.md
 
-          if [ -z "$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')" ]; then
-            gh issue create --title "$title" --body-file /tmp/issue-body.md
+          # REST, not gh issue list/create: those use GraphQL, which rejects
+          # this workflow's token ("Resource not accessible by integration")
+          # even with issues: write granted. The REST issues API accepts it.
+          existing_issue=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" \
+            --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)
+          if [ -z "$existing_issue" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/issues" -f title="$title" -F body=@/tmp/issue-body.md
           fi
           echo "::error::Merge conflict on $BRANCH was not auto-fixed; issue filed"
           exit 1
