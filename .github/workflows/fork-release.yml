@@ -74,6 +74,20 @@ jobs:
           # can never push workflow changes, so use a PAT with workflows scope.
           token: ${{ secrets.FORK_RELEASE_TOKEN }}
 
+      # Because the tag is pushed with a PAT (user token), the push triggers
+      # workflows — GITHUB_TOKEN pushes wouldn't. That fires upstream's
+      # tag-triggered release.yml on the fork, whose duplicate packager run
+      # fails (it re-updates the already-published release and trips the
+      # release-body size cap). It is fully redundant here — this workflow
+      # packages and publishes — so keep it disabled. Idempotent: re-disables
+      # it on every run in case it ever gets re-enabled.
+      - name: Keep upstream's tag-triggered packager disabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/disable" \
+            || echo "::warning::Could not disable release.yml (missing or renamed upstream?)"
+
       - name: Merge feat branches onto latest upstream tag
         id: build
         env:
