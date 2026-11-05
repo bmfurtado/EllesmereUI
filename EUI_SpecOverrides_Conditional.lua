@@ -107,6 +107,7 @@ Cond.ICONS = {
     arena        = "override-arena.png",
     battleground = "override-horde.png",
     solo         = "override-solo.png",
+    controller   = "override-controller.png",
 }
 
 --- True while EITHER override editing session (spec or conditional) is live.
