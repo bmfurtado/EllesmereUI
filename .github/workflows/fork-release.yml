@@ -6,29 +6,33 @@ name: Fork release (upstream tag + feat branches)
 # is named feat/*; delete a branch (e.g. after its upstream PR merges) and it
 # drops out of the next release automatically.
 #
-# On a merge conflict, the conflict-issue job opens an issue so a human can
-# rebase the conflicting branch onto the upstream tag and re-run the workflow.
+# Every run works out what the release *should* contain — the latest upstream
+# tag plus the current tip of every feat/* branch that upstream does not have
+# yet — and compares that with what the latest -bmf.N release for that tag was
+# built from (recorded in the tag message). A new upstream tag, a feat branch
+# created, pushed to, rebased or deleted: each changes the composition, and
+# the next run cuts -bmf.N+1. Nothing changed: the run is a no-op. So the
+# schedule is the only trigger that matters; it runs hourly because upstream
+# often tags several times a day and GitHub starts cron runs hours late.
 #
-# Scheduled runs release once per upstream tag. To cut a new release for the
-# same upstream tag (e.g. after adding a feat branch mid-cycle), trigger the
-# workflow manually with force enabled — it bumps the -bmf.N suffix. Two more
-# paths force a mid-cycle release automatically:
-#   - creating a feat/* branch: fork-branch-sanitize.yml strips the fork-only
-#     config commits from the new branch, then dispatches this workflow with
-#     force (a create trigger here would race the sanitizer's force-push);
-#   - deleting a feat/* branch: the delete trigger below rebuilds the release
-#     without it right away instead of waiting for the next upstream tag.
-# Either way the release is still built from the latest upstream release tag,
-# exactly as on scheduled runs.
+# Two event triggers shorten the wait where GitHub lets us: deleting a feat/*
+# branch runs the same check right away, and fork-branch-sanitize.yml
+# dispatches it after cleaning a feat/* branch cut from fork main. (A create
+# or push event cannot trigger this workflow for a branch cut from upstream:
+# those only fire for workflow files present on the pushed ref.) Manual
+# dispatch with force enabled cuts -bmf.N+1 even when nothing changed.
+#
+# On a merge conflict, the conflict-issue job opens an issue so a human can
+# rebase the conflicting branch onto the upstream tag; the next run retries.
 
 on:
   schedule:
-    - cron: '17 3,15 * * *'
+    - cron: '17 * * * *'
   delete:
   workflow_dispatch:
     inputs:
       force:
-        description: Release again for the current upstream tag (bumps -bmf.N)
+        description: Release again for the current upstream tag even if nothing changed (bumps -bmf.N)
         type: boolean
         default: false
 
@@ -81,7 +85,7 @@ jobs:
       - name: Merge feat branches onto latest upstream tag
         id: build
         env:
-          FORCE: ${{ inputs.force == true || github.event_name == 'delete' }}
+          FORCE: ${{ inputs.force == true }}
         run: |
           set -euo pipefail
 
@@ -101,20 +105,62 @@ jobs:
           fi
           echo "Latest upstream release: $upstream_tag"
 
-          existing=$(git tag --list "${upstream_tag}-bmf.*" | wc -l)
-          if [ "$existing" -gt 0 ] && [ "$FORCE" != "true" ]; then
-            echo "Fork release for $upstream_tag already exists; nothing to do."
-            echo "proceed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          fork_tag="${upstream_tag}-bmf.$((existing + 1))"
-
-          feat_branches=$(git branch -r --list 'origin/feat/*' --format='%(refname:short)')
+          # A feat branch whose commits upstream already has (its PR merged)
+          # adds nothing; leave it out so it can't keep forcing new releases.
+          nl=$'\n'
+          feat_branches=""
+          for branch in $(git branch -r --list 'origin/feat/*' --format='%(refname:short)'); do
+            if git merge-base --is-ancestor "$branch" "$upstream_tag"; then
+              echo "$branch is already part of $upstream_tag; skipping it (delete the branch once its upstream PR has shipped)"
+            else
+              feat_branches="${feat_branches:+$feat_branches$nl}$branch"
+            fi
+          done
           if [ -z "$feat_branches" ]; then
-            echo "No feat/ branches on origin; nothing to release on top of $upstream_tag."
+            echo "No feat/ branches with changes on top of $upstream_tag; nothing to release."
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          # What this release would be built from, one "branch@sha" per line.
+          # The same list is written into the fork tag's message, so a later
+          # run can tell whether anything has changed since.
+          composition=$(for branch in $feat_branches; do
+            echo "${branch#origin/}@$(git rev-parse "$branch")"
+          done)
+
+          last_tag=$(git tag --list "${upstream_tag}-bmf.*" | sort -V | tail -n 1)
+          if [ -n "$last_tag" ] && [ "$FORCE" != "true" ]; then
+            recorded=$(git for-each-ref "refs/tags/$last_tag" --format='%(contents:body)' \
+              | grep -E '^feat/.+@[0-9a-f]{40}$' || true)
+            if [ -n "$recorded" ]; then
+              if [ "$recorded" = "$composition" ]; then
+                echo "$last_tag was built from exactly these feat/ branches; nothing to do."
+                echo "proceed=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "feat/ branches changed since $last_tag:"
+              diff <(echo "$recorded") <(echo "$composition") || true
+            else
+              # Tag made before the composition was recorded: all we can
+              # check is whether every branch tip is already in it.
+              stale=""
+              for branch in $feat_branches; do
+                if ! git merge-base --is-ancestor "$branch" "$last_tag"; then
+                  echo "$branch has commits that $last_tag does not include"
+                  stale=true
+                fi
+              done
+              if [ -z "$stale" ]; then
+                echo "$last_tag already includes every feat/ branch; nothing to do."
+                echo "proceed=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+          fi
+
+          last_n=${last_tag##*-bmf.}
+          fork_tag="${upstream_tag}-bmf.$(( ${last_n:-0} + 1 ))"
 
           git checkout --detach "$upstream_tag"
 
@@ -134,7 +180,8 @@ jobs:
             fi
           done
 
-          git tag -a "$fork_tag" -m "$upstream_tag + $(echo "$feat_branches" | sed 's|^origin/||' | paste -sd ', ' -)"
+          summary="$upstream_tag + $(echo "$feat_branches" | sed 's|^origin/||' | paste -sd ', ' -)"
+          git tag -a "$fork_tag" -m "$summary" -m "$composition"
           git push origin "$fork_tag"
           echo "Tagged and pushed $fork_tag"
           echo "proceed=true" >> "$GITHUB_OUTPUT"
@@ -164,7 +211,7 @@ jobs:
           {
             echo "Merging \`$BRANCH\` onto \`$UPSTREAM_TAG\` failed with conflicts."
             echo
-            echo "Resolve by rebasing the branch onto the tag, then re-run the workflow."
+            echo "Resolve by rebasing the branch onto the tag; the next scheduled run picks it up."
             echo
             echo "Failed run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } > /tmp/issue-body.md
